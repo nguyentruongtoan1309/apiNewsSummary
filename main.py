@@ -1,131 +1,161 @@
-from threading import Thread
 import pymysql
 from app import app
+from text_rank import execute_text_rank
+from crawler.content_getter import get_article
 from db_config import mysql
 from flask import jsonify
 from flask import flash, request
 from newspaper import Article
-import numpy as np
-import asyncio
-import nltk
-import networkx as nx
-import heapq
-import regex
-from pyvi import ViTokenizer
-from sklearn.metrics.pairwise import cosine_similarity
 import datetime
-import threading
-import spacy
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 import schedule
+from urllib.request import Request, urlopen
+from bs4 import BeautifulSoup
 
 
-def get_current_time():
-    cdate = datetime.datetime.now()
-    # c_time = datetime.time(datetime.now())
-    return cdate
+# def custom_items(cate, soup, tag, class_name):
+#     items = soup.find_all(tag, attrs=class_name)
+#     if cate == "remove":
+#         for item in items:
+#             item.decompose()
+#     if cate == "add_dot":
+#         for item in items:
+#             item.string = item.text+"."
 
 
-def read_vi_stopwords(file_name):
-    stop_words = []
-    stop_words = [stopword.rstrip('\n')
-                  for stopword in open(file_name, encoding="utf_8")]
-    return stop_words
+# def getContents(urlArticle):
+#     if ("https://m." in urlArticle):
+#         urlArticle = urlArticle.replace("https://m.", "https://")
+#     try:
+#         contents = ""
+#         description = ""
+#         hdr = {'User-Agent': 'Mozilla/5.0'}
+#         if ("https://dantri.com.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             if soup.find('div', class_='dt-news__sapo'):
+#                 description = soup.find(
+#                     'div', class_='dt-news__sapo').find('h2').text
+#                 contents += description
+#             news_contents = soup.find('div', class_='dt-news__content').find_all(
+#                 lambda tag: tag.name == 'p' and not tag.attrs and not tag.next_element.name == 'strong')
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://vnexpress.net/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='title-detail').text
+#             if soup.find('p', class_='description'):
+#                 description = soup.find('p', class_='description').text
+#                 contents += description
+#             news_contents = soup.find_all(
+#                 'p', attrs={"class": "Normal", "style": ""})
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://tuoitre.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='article-title').text
+#             if soup.find('h2', class_='sapo'):
+#                 contents += soup.find('h2', class_='sapo').text
+#                 contents = contents.replace('TTO - ', '')
+#                 description += contents
 
-
-def getContents(urlArticle):
-    try:
-        article = Article(urlArticle)
-        article.download()
-        article.parse()
-        content = (article.text ==
-                   "") and article.meta_data['description'] or article.text
-        return content
-    except:
-        print("Can't download from url!")
-        return ""
-
-
-def textRank(content, senNum):
-    # nltk.download("punkt")  # one time execution
-    contents_parsed = content.replace('\n', ' ').replace('\r', '')
-    contents_parsed = " ".join(regex.split(
-        "\s+", contents_parsed, flags=regex.UNICODE))
-    origin_text = regex.split(
-        r'(?<!\w\.\w.)(?<![A-Z][a-z])(?<=\.|\?|\;|\!)\s(?![a-z])', contents_parsed)
-    # Xóa 1 câu nếu câu tương đồng với 1 câu khác trong content
-    nlp = spacy.load('vi_spacy_model')
-    i = 0
-    while i < len(origin_text):
-        doc1 = nlp(origin_text[i])
-        j = i+1
-        while j < len(origin_text):
-            doc2 = nlp(origin_text[j])
-            if (doc1.similarity(doc2) > 0.75):
-                origin_text.pop(j)
-            j += 1
-        i += 1
-    origin_sentences = []
-    for sen in origin_text:
-        senLower = sen.lower()  # Biến đổi hết thành chữ thường
-        origin_sentences.append(senLower)
-
-    if int(senNum) >= len(origin_text):
-        senNum = str(len(origin_text) - 1)
-
-    sentence_tokenized = []
-    for sentence in origin_sentences:
-        sent_tokenized = ViTokenizer.tokenize(sentence)
-        sentence_tokenized.append(sent_tokenized)
-
-    stop_words = read_vi_stopwords("vietnamese-stopwords-dash.txt")
-
-    def remove_stopwords(sen):
-        sen_new = " ".join([i for i in sen if i not in stop_words])
-        return sen_new
-
-    sentences_without_sw = [remove_stopwords(
-        r.split()) for r in sentence_tokenized]
-    sentences_without_sw = list(dict.fromkeys(sentences_without_sw))
-    word_embeddings = {}
-    f = open("vi.txt", encoding="utf_8", errors="ignore")
-    for line in f:
-        values = line.split()
-        word = values[0]
-        coefs = np.asarray(values[1:], dtype="float32")
-        word_embeddings[word] = coefs
-    f.close()
-    sentence_vectors = []
-    for i in sentences_without_sw:
-        if len(i) != 0:
-            v = sum([word_embeddings.get(w, np.zeros((100,))) for w in i.split()]) / (
-                len(i.split()) + 0.001
-            )
-        else:
-            v = np.zeros((100,))
-        sentence_vectors.append(v)
-    # similarity matrix
-    sim_mat = np.zeros(
-        [len(sentences_without_sw), len(sentences_without_sw)])
-    # khởi tạo ma trận với điểm số tương tự cosine.
-    for i in range(len(sentences_without_sw)):
-        for j in range(len(sentences_without_sw)):
-            if i != j:
-                sim_mat[i][j] = cosine_similarity(
-                    sentence_vectors[i].reshape(1, 100),
-                    sentence_vectors[j].reshape(1, 100),
-                )[0, 0]
-    # chuyển đổi ma trận tương tự sim_mat thành một đồ thị
-    nx_graph = nx.from_numpy_array(sim_mat)
-    # áp dụng thuật toán Xếp hạng trang để xếp hạng câu
-    scores = nx.pagerank(nx_graph)
-    top_sentences = heapq.nlargest(int(senNum), scores, key=scores.get)
-    summary = ""
-    top_sentences.sort()
-    for i in top_sentences:
-        summary += " " + origin_text[i]
-    return summary
+#             def get_content(tag):
+#                 return tag.name == 'p' and (not tag.attrs or (tag.attrs == 1 and tag.attrs.values() == [])) and not tag.next_element.name == 'b'
+#             news_contents = soup.find(
+#                 'div', class_='content fck').find_all(get_content)
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://thanhnien.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='details__headline').text
+#             if soup.find('div', id='chapeau'):
+#                 contents += soup.find('div', id='chapeau').text
+#                 description += contents
+#             news_contents = soup.find("div", id="abody")
+#             custom_items("remove", news_contents,
+#                          "table", {"class": "imagefull"})
+#             custom_items("remove", news_contents, "table", {"class": "video"})
+#             custom_items("add_dot", news_contents, "h2", {"class": ""})
+#             contents += news_contents.text
+#             return contents
+#         elif ("https://nhandan.com.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='box-title-detail').text
+#             if soup.find('div', class_='box-des-detail'):
+#                 contents += soup.find('div',
+#                                       class_='box-des-detail').find('p').text
+#                 description += contents
+#             custom_items("add_dot", soup.find(
+#                 "div", class_="detail-content-body"), "strong", {"class": ""})
+#             news_contents = soup.find(
+#                 "div", class_="detail-content-body").find_all(lambda tag: tag.name == 'p' and not tag.attrs)
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://plo.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='main-title').text
+#             if soup.find(id='chapeau'):
+#                 contents += (soup.find(id='chapeau').text).replace('(PLO)-', '')
+#                 description += contents
+#             custom_items("remove", soup.find("div", id="abody"),
+#                          "article", {"class": "article-related"})
+#             custom_items("remove", soup.find("div", id="abody"),
+#                          "p", {"class": "item-photo"})
+#             news_contents = soup.find("div", id="abody").find_all(
+#                 lambda tag: tag.name == 'p')
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://vietnamnet.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='title').text
+#             if soup.find('div', class_="bold ArticleLead"):
+#                 description += soup.find('div', class_="bold ArticleLead").text
+#             custom_items("remove", soup.find("div", id="ArticleContent"), "table", {
+#                          "class": "FmsArticleBoxStyle"})
+#             custom_items("remove", soup.find(
+#                 "div", id="ArticleContent"), "strong", {"class": ""})
+#             custom_items("remove", soup.find("div", id="ArticleContent"), "div", {
+#                          "class": "inner-article"})
+#             news_contents = soup.find("div", id="ArticleContent").find_all(
+#                 lambda tag: tag.name == 'p')
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         elif ("https://nld.com.vn/" in urlArticle):
+#             soup = BeautifulSoup(
+#                 urlopen(Request(urlArticle, headers=hdr)), "lxml")
+#             title = soup.find('h1', class_='title-content').text
+#             if soup.find('h2', class_='sapo-detail'):
+#                 contents += (soup.find('h2',
+#                              class_='sapo-detail').text).replace("(NLĐO)", "")
+#                 description += contents
+#             news_contents = soup.find(
+#                 "div", class_="content-news-detail").find_all(lambda tag: tag.name == 'p' and not tag.attrs)
+#             for item in news_contents:
+#                 contents += " "+item.text
+#             return contents
+#         else:
+#             article = Article(urlArticle)
+#             article.download()
+#             article.parse()
+#             contents = (
+#                 article.text == "") and article.meta_data['description'] or article.text
+#             return contents
+#     except:
+#         print("Can't download from url!")
+#         return ""
 
 
 def create_article_summary(id):
@@ -143,7 +173,7 @@ def create_article_summary(id):
             article.parse()
             content = (article.text ==
                        "") and article.meta_data['description'] or article.text
-            summary = textRank(content, 2)
+            summary = execute_text_rank(content, 2)
             row = (summary == ' ') and {
                 'summary': article.meta_data['description']} or {'summary': summary}
             resp = jsonify(row)
@@ -214,7 +244,7 @@ def create_article_summary(id):
         article.parse()
         content = (article.text ==
                    "") and article.meta_data['description'] or article.text
-        summary = textRank(content, 2)
+        summary = execute_text_rank(content, 2)
         row = (summary == ' ') and {
             'summary': article.meta_data['description']} or {'summary': summary}
         resp = jsonify(row)
@@ -244,8 +274,8 @@ def create_article_group_summary(id):
         rows = cursor.fetchall()
         content = ''
         for urlAg in rows:
-            content += " "+getContents(urlAg['url'])
-        summary = textRank(content, 5)
+            content += " "+get_article(urlAg['url'], '')
+        summary = execute_text_rank(content, 5)
         print(summary)
         print(content)
         rows = {'summary': content}
@@ -260,10 +290,11 @@ def create_article_group_summary(id):
 
 
 def update_database():
-    print(get_current_time())
+    print(datetime.datetime.now())
     with app.app_context():
         try:
-            sql = "INSERT INTO you_news.articlegroupsummary(agId, createdAt, summaryContent, title, image) VALUES(%s, %s, %s, %s, %s)"
+            hdr = {'User-Agent': 'Mozilla/5.0'}
+            sql = "INSERT INTO you_news.articlegroupsummary(agId, articleId, createdAt, summaryContent, title, image) VALUES(%s, %s, %s, %s, %s, %s)"
             conn = mysql.connect()
             cursor = conn.cursor(pymysql.cursors.DictCursor)
             cursor.execute('''SELECT * FROM you_news.articlegroup
@@ -277,25 +308,23 @@ def update_database():
                 inner join UrlMeta um on (agu.url = um.url)
                 where um.image <> '' and ag.id = %s
                 order by agu.processorCounterId desc, ag.`rank`, agu.`rank`
-                limit 0, 5;''', row['id'])
+                limit 0, 3;''', row['id'])
                 data = cursor.fetchall()
-                image = ''
-                content = ''
                 for item in data:
-                    if(image == ''):
-                        image += item['image']
-                    content += " " + getContents(item['url'])
-                summary = textRank(content, 5)
-                print('==============')
-                values = (row['id'], datetime.datetime.now(),
-                          summary, row['title'], image)
-                try:
-                    cursor.execute(sql, values)
-                    conn.commit()
-                except Exception as e:
-                    print(e)
+                    image = item['image']
+                    content = get_article(item['url'], hdr)
+                    summary = execute_text_rank(content, 3)
+                    values = (row['id'], item['id'], datetime.datetime.now(),
+                              summary, row['title'], image)
+                    try:
+                        cursor.execute(sql, values)
+                        conn.commit()
+                        print("====")
+                    except Exception as e:
+                        print(e)
             return True, None
         except Exception as e:
+            print(e)
             return False, e
         finally:
             print("Success")
@@ -317,18 +346,8 @@ def add_article_group_summary():
             return resp
 
 
-def test():
-    print("o")
-
-# def Schedule():
-#     schedule.every(5).seconds.do(update_database)
-#     while True:
-#         schedule.run_pending()
-#         time.sleep(1)
-
-
 sched = BackgroundScheduler()
-sched.add_job(update_database, 'cron', minute="*/1")
+sched.add_job(update_database, 'cron', minute="*/5")
 sched.start()
 
 # Shut down the scheduler when exiting the app
@@ -352,7 +371,3 @@ def main():
 
 
 main()
-
-# t2 = threading.Thread(target=main)
-# t2.start()
-# t2.join()
